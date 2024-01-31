@@ -17,19 +17,17 @@ OFLAGS_PI = -O3 -ffast-math -march=native -mtune=native
 #OFLAGS_PI = -fast -xO5
 
 
-
-
 all: pi_fft4g pi_fft8g pi_fftsg
 
 
 pi_fft4g : pi_fft.o fft4g.o
-	$(CC) pi_fft.o fft4g.o -lm -o pi_fft4g
+	$(CC) pi_fft.o fft4g.o -lm -lpthread -o pi_fft4g
 
 pi_fft8g : pi_fft.o fft8g.o
-	$(CC) pi_fft.o fft8g.o -lm -o pi_fft8g
+	$(CC) pi_fft.o fft8g.o -lm -lpthread -o pi_fft8g
 
 pi_fftsg : pi_fft.o fftsg.o
-	$(CC) pi_fft.o fftsg.o -lm -o pi_fftsg
+	$(CC) pi_fft.o fftsg.o -lm -lpthread -o pi_fftsg
 
 
 pi_fft.o : pi_fft.c
@@ -46,8 +44,7 @@ fftsg.o : ../fftsg.c
 	$(CC) $(CFLAGS) $(OFLAGS_FFT) -c ../fftsg.c -o fftsg.o
 
 
-
-
 clean:
 	rm -f *.o
+	rm -f pi_fft4g pi_fft8g pi_fftsg
 

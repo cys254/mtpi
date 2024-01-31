@@ -125,7 +125,9 @@ float base_indices[] = {
       1.596e7,  // 17
       1.568e7,  // 18
       1.551e7,  // 19
-      1.393e7,  // 20
+      // 1.393e7,  // 20
+      1.443e7,  // 20
+      1.428e7,  // 21
 };
 
 struct mt_context
@@ -188,9 +190,9 @@ int is_done()
 }
 
 
-void mp_pi(int nfft, int radix, int log10_radix, int do_print,
+int mp_pi(int nfft, int radix, int log10_radix, int do_print,
            int *a, int *b, int *c, int *e, int *i1, int *i2, int *ip,
-           double *d1, double *d2, double *d3, double *w)
+           double *d1, double *d2, double *d3, double *w, int after_time)
 {
     int n, npow, nprc;
     
@@ -265,6 +267,11 @@ void mp_pi(int nfft, int radix, int log10_radix, int do_print,
     if (do_print) {
         printf("AGM iteration\n");
     }
+    if (after_time) {
+        if (is_done()) {
+            return 1;
+        }
+    }
     npow = 4;
     do {
         npow *= 2;
@@ -290,6 +297,11 @@ void mp_pi(int nfft, int radix, int log10_radix, int do_print,
         if (do_print) {
             printf("precision= %d\n", 4 * nprc * log10_radix);
         }
+        if (after_time) {
+            if (is_done()) {
+                return 1;
+            }
+        }
     } while (4 * nprc <= n);
     /* ---- e = e * e / 4 (half precision) ---- */
     mp_idiv_2(n, radix, e, e);
@@ -306,7 +318,7 @@ void mp_pi(int nfft, int radix, int log10_radix, int do_print,
     mp_sub(n, radix, a, e, a);
     mp_mul(n, radix, a, b, a, i1, nfft, d1, d2, d3, ip, w);
     mp_idiv(n, radix, a, npow, a);
-    /* ---- time check ---- */
+    return 0;
 }
 
 struct pi_context {
@@ -329,6 +341,7 @@ struct pi_context {
     int run_cnt;
     float duration;
     pthread_t thread;
+    float t0;
 };
 
 
@@ -405,11 +418,11 @@ void pi_context_free(struct pi_context *ctx)
     free(ctx->ip);
 }
 
-void pi_context_run(struct pi_context *ctx)
+int pi_context_run(struct pi_context *ctx, int after_time)
 {
-    mp_pi(ctx->nfft, ctx->radix, ctx->log10_radix, ctx->do_print,
+    return mp_pi(ctx->nfft, ctx->radix, ctx->log10_radix, ctx->do_print,
           ctx->a, ctx->b, ctx->c, ctx->e, ctx->i1, ctx->i2, ctx->ip,
-          ctx->d1, ctx->d2, ctx->d3, ctx->w);
+          ctx->d1, ctx->d2, ctx->d3, ctx->w, after_time);
 }
 
 void run_mp_pi(int nfft, int do_print)
@@ -417,7 +430,7 @@ void run_mp_pi(int nfft, int do_print)
     struct pi_context ctx;
 
     pi_context_init(&ctx, nfft, do_print);
-    pi_context_run(&ctx);
+    pi_context_run(&ctx, 0);
 
     /* ---- output ---- */
     if (do_print) {
@@ -433,28 +446,36 @@ void run_mp_pi(int nfft, int do_print)
 
 void run_mp_pi_bench(struct pi_context *ctx)
 {
-    float t0, t1;
+    float t1;
     int batch_size = 1;
     // char buf[100];
+    int done;
+
+    start_bench();
 
     // send_msg("reset_timer");
 
-    t0 = get_time();
-    t1 = t0;
-    pi_context_run(ctx);
+    pi_context_run(ctx, 0);
     t1 = get_time();
     ctx->run_cnt = 1;
 
-    while (t1 - t0 < 5.0) {
+    while (t1 - ctx->t0 < 5.0) {
         int i;
         for (i=0;i<batch_size;i++) {
-           pi_context_run(ctx);
+           pi_context_run(ctx, 0);
            t1 = get_time();
         }
         ctx->run_cnt += batch_size;
         batch_size *= 2;
     }
-    ctx->duration = t1 - t0;
+    ctx->duration = t1 - ctx->t0;
+
+    done_bench();
+
+    done = is_done();
+    while (!done) {
+        done = pi_context_run(ctx, 1);
+    }
 
     // sprintf(buf, "%d,%d,%d,%g", ctx.nfft, ctx.log10_radix, run_cnt, n_op);
     // send_msg(buf);
@@ -463,14 +484,13 @@ void run_mp_pi_bench(struct pi_context *ctx)
 void *mp_pi_bench_thread_func(void *arg)
 {
     struct pi_context *ctx = (struct pi_context*) arg;
-    start_bench();
     run_mp_pi_bench(ctx);
-    done_bench();
     return 0;
 }
 
 void mp_pi_bench_new_thread(struct pi_context *ctx)
 {
+    ctx->t0 = get_time();
     if (pthread_create(&ctx->thread, 0, mp_pi_bench_thread_func, ctx)) {
         printf("PThread Create Failure!\n");
         exit(1);
@@ -484,18 +504,20 @@ void benchmark_mp_pi(int nfft, int mt)
     double n_op;
     float rate = 0.0;
     float total_duration;
-    int total_run_cnt;
+    int i, total_run_cnt;
 
     ctx = (struct pi_context*) malloc(sizeof(struct pi_context)*mt);
 
     pi_context_init(&ctx[0], nfft, 0);
 
     if (mt > 1) {
-        for (int i = 1; i < mt; i++) {
+        for (i = 1; i < mt; i++) {
             pi_context_copy(&ctx[i], &ctx[0]);
             mp_pi_bench_new_thread(&ctx[i]);
         }
     }
+
+    ctx[0].t0 = get_time();
 
     run_mp_pi_bench(&ctx[0]);
 
@@ -504,7 +526,7 @@ void benchmark_mp_pi(int nfft, int mt)
     rate += ctx[0].run_cnt / ctx[0].duration;
 
     if (mt > 1) {
-        for (int i = 1; i < mt; i++) {
+        for (i = 1; i < mt; i++) {
             pthread_join(ctx[i].thread, 0);
             total_duration += ctx[i].duration;
             total_run_cnt += ctx[i].run_cnt;
@@ -517,10 +539,10 @@ void benchmark_mp_pi(int nfft, int mt)
     /* ---- benchmark ---- */
     printf("%2d %7d %d %5d %.3e %8.3f %.4e %.4e %.3f\n",
         mt, ctx[0].nfft, ctx[0].log10_radix, total_run_cnt, n_op,
-        total_duration, rate,
+        total_duration/mt, rate,
         n_op*rate*1e-6, n_op*rate/base_indices[ctx[0].log2_nfft]);
 
-    for (int i=0;i<mt;i++) {
+    for (i=0;i<mt;i++) {
         pi_context_free(&ctx[i]);
     }
 
@@ -529,14 +551,16 @@ void benchmark_mp_pi(int nfft, int mt)
 
 int main(int argc, char** argv)
 {
-    int nfft;
+    int nfft, arg1 = 1;
     if (argc > 1) {
-        nfft = atoi(argv[1]);
-        run_mp_pi(nfft, 1);
+        arg1 = atoi(argv[1]);
+    }
+    if (arg1 >= 128) {
+        run_mp_pi(arg1, 1);
     } else {
         printf("mt  nfft   run_cnt     nops  duration     rate     mflops   index\n");
         for (nfft = 512; nfft <= 2097152; nfft*=2) {
-            benchmark_mp_pi(nfft, 2);
+            benchmark_mp_pi(nfft, arg1);
         }
     }
 
