@@ -33,6 +33,7 @@ Example compilation:
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <pthread.h>
 
 int send_msg(const char* my_message) {
     static int fd = -1;
@@ -126,6 +127,65 @@ float base_indices[] = {
       1.551e7,  // 19
       1.393e7,  // 20
 };
+
+struct mt_context
+{
+    pthread_mutex_t lock;
+    int running_cnt;
+} mt_context = {
+    PTHREAD_MUTEX_INITIALIZER,
+    0,
+};
+
+void start_bench()
+{
+    if (pthread_mutex_lock(&mt_context.lock)) {
+        printf("PThread Mutex Lock Failure!\n");
+        exit(1);
+    }
+
+    mt_context.running_cnt++;
+
+    if (pthread_mutex_unlock(&mt_context.lock)) {
+        printf("PThread Mutex Unlock Failure!\n");
+        exit(1);
+    }
+}
+
+void done_bench()
+{
+    if (pthread_mutex_lock(&mt_context.lock)) {
+        printf("PThread Mutex Lock Failure!\n");
+        exit(1);
+    }
+
+    mt_context.running_cnt--;
+
+    if (pthread_mutex_unlock(&mt_context.lock)) {
+        printf("PThread Mutex Unlock Failure!\n");
+        exit(1);
+    }
+}
+
+int is_done()
+{
+    int is_done = 0;
+
+    if (pthread_mutex_lock(&mt_context.lock)) {
+        printf("PThread Mutex Lock Failure!\n");
+        exit(1);
+    }
+
+    if (mt_context.running_cnt == 0) {
+        is_done = 1;
+    }
+
+    if (pthread_mutex_unlock(&mt_context.lock)) {
+        printf("PThread Mutex Unlock Failure!\n");
+        exit(1);
+    }
+    return is_done;
+}
 
 
 void mp_pi(int nfft, int radix, int log10_radix, int do_print,
@@ -268,6 +328,7 @@ struct pi_context {
     double *w;
     int run_cnt;
     float duration;
+    pthread_t thread;
 };
 
 
@@ -374,6 +435,9 @@ void run_mp_pi_bench(struct pi_context *ctx)
 {
     float t0, t1;
     int batch_size = 1;
+    // char buf[100];
+
+    // send_msg("reset_timer");
 
     t0 = get_time();
     t1 = t0;
@@ -391,34 +455,76 @@ void run_mp_pi_bench(struct pi_context *ctx)
         batch_size *= 2;
     }
     ctx->duration = t1 - t0;
+
+    // sprintf(buf, "%d,%d,%d,%g", ctx.nfft, ctx.log10_radix, run_cnt, n_op);
+    // send_msg(buf);
+}
+
+void *mp_pi_bench_thread_func(void *arg)
+{
+    struct pi_context *ctx = (struct pi_context*) arg;
+    start_bench();
+    run_mp_pi_bench(ctx);
+    done_bench();
+    return 0;
+}
+
+void mp_pi_bench_new_thread(struct pi_context *ctx)
+{
+    if (pthread_create(&ctx->thread, 0, mp_pi_bench_thread_func, ctx)) {
+        printf("PThread Create Failure!\n");
+        exit(1);
+    }
 }
 
 
-void benchmark_mp_pi(int nfft, int do_print)
+void benchmark_mp_pi(int nfft, int mt)
 {
-    struct pi_context ctx;
+    struct pi_context *ctx;
     double n_op;
-    float rate;
-    // char buf[100];
+    float rate = 0.0;
+    float total_duration;
+    int total_run_cnt;
 
-    pi_context_init(&ctx, nfft, do_print);
-    
-    // send_msg("reset_timer");
+    ctx = (struct pi_context*) malloc(sizeof(struct pi_context)*mt);
 
-    run_mp_pi_bench(&ctx);
+    pi_context_init(&ctx[0], nfft, 0);
 
-    n_op = 50.0 * ctx.nfft * ctx.log2_nfft * ctx.log2_nfft;
-    // sprintf(buf, "%d,%d,%d,%g", ctx.nfft, ctx.log10_radix, run_cnt, n_op);
-    // send_msg(buf);
-    rate = 1.0 * ctx.run_cnt / ctx.duration;
+    if (mt > 1) {
+        for (int i = 1; i < mt; i++) {
+            pi_context_copy(&ctx[i], &ctx[0]);
+            mp_pi_bench_new_thread(&ctx[i]);
+        }
+    }
+
+    run_mp_pi_bench(&ctx[0]);
+
+    total_duration = ctx[0].duration;
+    total_run_cnt = ctx[0].run_cnt;
+    rate += ctx[0].run_cnt / ctx[0].duration;
+
+    if (mt > 1) {
+        for (int i = 1; i < mt; i++) {
+            pthread_join(ctx[i].thread, 0);
+            total_duration += ctx[i].duration;
+            total_run_cnt += ctx[i].run_cnt;
+            rate += ctx[i].run_cnt / ctx[i].duration;
+        }
+    }
+
+    n_op = 50.0 * ctx[0].nfft * ctx[0].log2_nfft * ctx[0].log2_nfft;
 
     /* ---- benchmark ---- */
-    printf("%7d %d %5d %.3e %8.3f %.4e %.4e %.3f\n",
-        ctx.nfft, ctx.log10_radix, ctx.run_cnt, n_op,
-        ctx.duration, rate,
-        n_op*rate*1e-6, n_op*rate/base_indices[ctx.log2_nfft]);
+    printf("%2d %7d %d %5d %.3e %8.3f %.4e %.4e %.3f\n",
+        mt, ctx[0].nfft, ctx[0].log10_radix, total_run_cnt, n_op,
+        total_duration, rate,
+        n_op*rate*1e-6, n_op*rate/base_indices[ctx[0].log2_nfft]);
 
-    pi_context_free(&ctx);
+    for (int i=0;i<mt;i++) {
+        pi_context_free(&ctx[i]);
+    }
+
+    free(ctx);
 }
 
 int main(int argc, char** argv)
@@ -428,9 +534,9 @@ int main(int argc, char** argv)
         nfft = atoi(argv[1]);
         run_mp_pi(nfft, 1);
     } else {
-        printf(" nfft   run_cnt     nops  duration     rate     mflops   index\n");
+        printf("mt  nfft   run_cnt     nops  duration     rate     mflops   index\n");
         for (nfft = 512; nfft <= 2097152; nfft*=2) {
-            benchmark_mp_pi(nfft, 0);
+            benchmark_mp_pi(nfft, 2);
         }
     }
 
